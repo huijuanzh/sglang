@@ -89,6 +89,11 @@ def indexed_scale_shift_bf16_(
     scale: torch.Tensor,
     indices: torch.Tensor,
 ) -> torch.Tensor:
+    if x.device.type == "xpu":
+        from sgl_kernel import indexed_scale_shift_bf16_ as _xpu_indexed_scale_shift_bf16_
+
+        return _xpu_indexed_scale_shift_bf16_(x, shift, scale, indices)
+
     rows, hidden_size = x.shape
     if rows == 0:
         return x
@@ -117,6 +122,11 @@ def _indexed_gate_bf16(
     other: torch.Tensor,
     indices: torch.Tensor,
 ) -> torch.Tensor:
+    if x.device.type == "xpu":
+        from sgl_kernel import indexed_gate_bf16_ as _xpu_indexed_gate_bf16_
+
+        return _xpu_indexed_gate_bf16_(x, gate, other, indices)
+
     rows, hidden_size = x.shape
     if rows == 0:
         return output

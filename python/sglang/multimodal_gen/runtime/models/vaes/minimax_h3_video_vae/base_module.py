@@ -14,6 +14,7 @@ from sglang.kernels.ops.activation.activation import (
 from sglang.kernels.ops.diffusion.triton.scale_shift import (
     try_fused_scaled_residual_add_exact,
 )
+from sglang.multimodal_gen.runtime.platforms import current_platform
 
 from .attention import Attention
 from .vit_utils import _env_flag, _vit_torch_compile_kwargs
@@ -77,6 +78,17 @@ class FeedForward(nn.Module):
 
         if self.use_gated:
             if (
+                isinstance(self.act_fn, nn.SiLU)
+                and current_platform.is_xpu()
+                and hidden_states.device.type == "xpu"
+                and hidden_states.dtype in (torch.float16, torch.bfloat16)
+                and hidden_states.is_contiguous()
+                and hidden_states.shape[-1] % 32 == 0
+            ):
+                from sgl_kernel import silu_and_mul as xpu_silu_and_mul
+
+                hidden_states = xpu_silu_and_mul(hidden_states)
+            elif (
                 isinstance(self.act_fn, nn.SiLU)
                 and hidden_states.is_cuda
                 and hidden_states.dtype in (torch.float16, torch.bfloat16)

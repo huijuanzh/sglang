@@ -71,7 +71,7 @@ def _can_use_fused_qknorm_rope(
             cache_dtype,
         )
         return False
-    if head_dim not in (64, 128, 256):
+    if head_dim not in (64, 96, 128, 256):
         logger.warning(f"Unsupported head_dim={head_dim} for JIT fused QKNorm+RoPE")
         return False
     if rope_dim <= 0 or rope_dim > head_dim:

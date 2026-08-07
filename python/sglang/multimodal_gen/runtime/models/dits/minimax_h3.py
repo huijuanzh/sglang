@@ -229,6 +229,20 @@ def _modulate_scale_shift(
     """Apply indexed affine modulation, reusing disposable CUDA BF16 input."""
     # Apply per-index affine modulation: x * (1 + scale[idx]) + shift[idx].
     if (
+        x.device.type == "xpu"
+        and x.dtype == _BF16_DTYPE
+        and dtype == _BF16_DTYPE
+        and shift.dtype == _BF16_DTYPE
+        and scale.dtype == _BF16_DTYPE
+        and x.dim() == 2
+        and indices.dim() == 1
+        and x.is_contiguous()
+        and not torch.compiler.is_compiling()
+    ):
+        from sgl_kernel import indexed_scale_shift_bf16_
+
+        return indexed_scale_shift_bf16_(x, shift, scale, indices)
+    if (
         x.is_cuda
         and x.dtype == _BF16_DTYPE
         and dtype == _BF16_DTYPE
@@ -254,6 +268,21 @@ def _modulate_gate(
     """Apply an indexed gated residual, optionally reusing the input buffer."""
     # Apply the per-index gated residual: x + gate[idx] * other.
     if (
+        x.device.type == "xpu"
+        and x.dtype == _BF16_DTYPE
+        and dtype == _BF16_DTYPE
+        and gate.dtype == _BF16_DTYPE
+        and other.dtype == _BF16_DTYPE
+        and x.dim() == other.dim() == 2
+        and indices.dim() == 1
+        and x.is_contiguous()
+        and other.is_contiguous()
+        and not torch.compiler.is_compiling()
+    ):
+        from sgl_kernel import indexed_gate_bf16_
+
+        return indexed_gate_bf16_(x, gate, other, indices)
+    if (
         x.is_cuda
         and x.dtype == _BF16_DTYPE
         and dtype == _BF16_DTYPE
@@ -269,6 +298,18 @@ def _modulate_gate(
 
 
 def _silu_mul(hidden: torch.Tensor, *, reuse_input: bool) -> torch.Tensor:
+    if (
+        reuse_input
+        and current_platform.is_xpu()
+        and hidden.device.type == "xpu"
+        and hidden.dtype == _BF16_DTYPE
+        and hidden.is_contiguous()
+        and hidden.shape[-1] % 16 == 0
+        and not torch.compiler.is_compiling()
+    ):
+        from sgl_kernel import silu_and_mul as xpu_silu_and_mul
+
+        return xpu_silu_and_mul(hidden)
     if (
         reuse_input
         and hidden.is_cuda
@@ -390,6 +431,31 @@ def _apply_rope_qk(
         True,
     )
     return q, k
+
+
+def _xpu_fused_inplace_qknorm_rope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    q_norm: nn.RMSNorm,
+    k_norm: nn.RMSNorm,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    head_dim: int,
+) -> None:
+    from sgl_kernel import fused_inplace_qknorm_rope as xpu_fused_qknorm_rope
+
+    xpu_fused_qknorm_rope(
+        q,
+        k,
+        q_norm.weight,
+        k_norm.weight,
+        cos_sin_cache.to(_FP32_DTYPE),
+        positions,
+        True,
+        eps=q_norm.eps,
+        head_dim=head_dim,
+        rope_dim=cos_sin_cache.shape[-1],
+    )
 
 
 class MiniMaxH3TimeEmbedder(nn.Module):
@@ -572,6 +638,7 @@ class MiniMaxH3Attention(nn.Module):
                 round_norm_before_rope=True,
             )
         )
+        self._use_xpu_fused_qknorm_rope = current_platform.is_xpu()
         self.out_proj = RowParallelLinear(
             self.inner_dim,
             arch.hidden_size,
@@ -683,6 +750,25 @@ class MiniMaxH3Attention(nn.Module):
                     head_dim=self.head_dim,
                     rope_dim=cos_sin_cache.shape[-1],
                     round_norm_before_rope=True,
+                )
+            elif (
+                self._use_xpu_fused_qknorm_rope
+                and q.device.type == "xpu"
+                and q.dtype == _BF16_DTYPE
+                and q.dtype == k.dtype == self.q_norm.weight.dtype == self.k_norm.weight.dtype
+                and q.stride(-1) == k.stride(-1) == 1
+                and self.q_norm.eps == self.k_norm.eps
+                and positions.dim() == 1
+                and not torch.compiler.is_compiling()
+            ):
+                _xpu_fused_inplace_qknorm_rope(
+                    q,
+                    k,
+                    self.q_norm,
+                    self.k_norm,
+                    cos_sin_cache,
+                    positions,
+                    self.head_dim,
                 )
             else:
                 q, k = _apply_qk_norm(
