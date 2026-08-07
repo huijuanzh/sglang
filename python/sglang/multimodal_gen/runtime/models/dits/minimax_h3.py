@@ -458,6 +458,17 @@ def _xpu_fused_inplace_qknorm_rope(
     )
 
 
+def _can_use_xpu_fused_qknorm_rope(head_dim: int, rope_dim: int) -> bool:
+    if head_dim not in (64, 96, 128, 256):
+        return False
+    if rope_dim <= 0 or rope_dim > head_dim:
+        return False
+    elems_per_thread = head_dim // 32
+    if elems_per_thread <= 0 or rope_dim % elems_per_thread != 0:
+        return False
+    return rope_dim // elems_per_thread >= 2
+
+
 class MiniMaxH3TimeEmbedder(nn.Module):
     def __init__(
         self,
@@ -759,6 +770,9 @@ class MiniMaxH3Attention(nn.Module):
                 and q.stride(-1) == k.stride(-1) == 1
                 and self.q_norm.eps == self.k_norm.eps
                 and positions.dim() == 1
+                and _can_use_xpu_fused_qknorm_rope(
+                    self.head_dim, cos_sin_cache.shape[-1]
+                )
                 and not torch.compiler.is_compiling()
             ):
                 _xpu_fused_inplace_qknorm_rope(
