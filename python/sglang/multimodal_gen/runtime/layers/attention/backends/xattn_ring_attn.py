@@ -173,13 +173,14 @@ class XAttnRingAttentionImpl(AttentionImpl):
             # cannot mask interior boundaries, so reject true multi-document
             # packing rather than silently attending across segments.
             if (
-                len(boundaries) < 2
+                len(boundaries) not in (2, 3)
                 or boundaries[0] != 0
-                or any(b != boundaries[1] for b in boundaries[1:])
+                or list(boundaries) != sorted(boundaries)
             ):
                 raise NotImplementedError(
                     f"{type(self).__name__} supports a single right-padded "
-                    f"packed document, got cu_seqlens={boundaries}."
+                    f"packed document ([0, used] or [0, used, total]), got "
+                    f"cu_seqlens={boundaries}."
                 )
             real_seq_len = boundaries[1]
 

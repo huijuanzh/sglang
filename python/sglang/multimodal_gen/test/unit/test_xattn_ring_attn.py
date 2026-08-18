@@ -183,15 +183,17 @@ def test_forward_varlen_rejects_multi_document():
     impl = XAttnRingAttentionBackend.get_impl_cls()(
         num_heads=H, head_size=D, causal=False, softmax_scale=D**-0.5
     )
-    q = torch.zeros(8, H, D, dtype=DTYPE)
+    q = torch.zeros(12, H, D, dtype=DTYPE)
     with pytest.raises(NotImplementedError, match="single right-padded"):
         impl.forward_varlen(
             q,
             q,
             q,
-            cu_seqlens=torch.tensor([0, 4, 8], dtype=torch.int32),
+            # [0, 4, 8, 12]: two real documents (rows 0-3 and 4-7) plus
+            # padding, not H3's single [0, used, total] convention.
+            cu_seqlens=torch.tensor([0, 4, 8, 12], dtype=torch.int32),
             max_seqlen=4,
-            cu_seqlens_host=(0, 4, 8),
+            cu_seqlens_host=(0, 4, 8, 12),
         )
 
 
