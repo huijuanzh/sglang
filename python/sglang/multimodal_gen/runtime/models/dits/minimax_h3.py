@@ -582,6 +582,15 @@ def _minimax_h3_attention_core_impl(
             ring_ws=ring_ws,
         )
     else:
+        # ring_active=False here even for a self-ring backend covers both the
+        # main attention with ring off and the refiner's redundant-per-rank
+        # call, neither of which should rotate KV across the ring group.
+        # Other backends' forward_varlen don't accept this kwarg at all.
+        extra = (
+            {"ring_active": ring_active}
+            if getattr(impl, "handles_sequence_parallel_ring", False)
+            else {}
+        )
         out = impl.forward_varlen(
             q,
             k,
@@ -589,6 +598,7 @@ def _minimax_h3_attention_core_impl(
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             cu_seqlens_host=cu_seqlens_host,
+            **extra,
         )
     if ulysses_active:
         out = _usp_output_all_to_all(out[None], head_dim=2)[0]

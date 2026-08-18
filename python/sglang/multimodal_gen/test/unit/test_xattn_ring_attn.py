@@ -241,6 +241,7 @@ def _worker_varlen(rank, world_size, port, queue):
             cu_seqlens=torch.tensor([0, real_seq_len], dtype=torch.int32, device=device),
             max_seqlen=real_seq_len,
             cu_seqlens_host=(0, real_seq_len),
+            ring_active=True,
         )
 
         # Padding rows produce unused garbage; only the real rows are compared.
@@ -290,3 +291,31 @@ def test_ring_varlen_ignores_padding(world_size):
             f"rank {rank}: local-only attention is within {local_gap:.3e} of the "
             f"reference, so rel err {rel_err:.3e} does not prove the ring rotated"
         )
+
+
+@requires_xattn
+def test_forward_varlen_defaults_to_no_rotation():
+    """H3's text refiner calls forward_varlen redundantly per rank, never
+    row-sharded across the ring group; ring_active must default to off so it
+    is not mistaken for a genuine per-rank ring chunk."""
+    scale = D**-0.5
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    real_len, total = 6, 8
+    q, k, v = (
+        torch.randn((total, H, D), generator=gen, dtype=torch.float32).to("xpu", DTYPE)
+        for _ in range(3)
+    )
+    impl = XAttnRingAttentionBackend.get_impl_cls()(
+        num_heads=H, head_size=D, causal=False, softmax_scale=scale
+    )
+    got = impl.forward_varlen(
+        q,
+        k,
+        v,
+        cu_seqlens=torch.tensor([0, real_len], dtype=torch.int32, device="xpu"),
+        max_seqlen=real_len,
+        cu_seqlens_host=(0, real_len),
+    )
+    expected = _reference_attention_thd(q[:real_len], k[:real_len], v[:real_len], scale)
+    rel_err = ((got[:real_len].float() - expected).abs().max() / expected.abs().max()).item()
+    assert rel_err < 1e-2, f"rel err {rel_err:.3e}"

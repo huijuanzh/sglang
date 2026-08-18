@@ -91,6 +91,7 @@ class XAttnRingAttentionImpl(AttentionImpl):
         **extra_impl_args,
     ) -> None:
         from xattention import ring_attn_ipc_forward
+        from xattention.ring_attn_interface import ring_attn_fmha
 
         if causal:
             # The kernel applies the mask identically on every ring round, so it
@@ -100,6 +101,7 @@ class XAttnRingAttentionImpl(AttentionImpl):
             )
 
         self._ring_attn_ipc_forward = ring_attn_ipc_forward
+        self._ring_attn_fmha = ring_attn_fmha
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.head_size = head_size
@@ -148,14 +150,16 @@ class XAttnRingAttentionImpl(AttentionImpl):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
         cu_seqlens_host: tuple[int, ...] | None = None,
+        ring_active: bool = False,
     ) -> torch.Tensor:
-        """Ring-rotated attention over one rank's packed ``[T, H, D]`` chunk.
+        """Attention over one rank's packed ``[T, H, D]`` chunk.
 
-        Mirrors ``usp._ring_attention_varlen``: the packed sequence is a single
-        right-padded document split into equal per-rank blocks, so block ``r``
-        contributes only ``clamp(real_len - r * T, 0, T)`` real rows. Passing
-        those lengths as ``valid_kv_lens`` makes the kernel clamp each ring
-        round internally, so no round attends across the padding boundary.
+        H3 also drives its (unsharded, redundant-per-rank) text refiner through
+        this same method with ``ring_active=False``: that call's rows are not
+        split across the ring group at all, so rotating it against the global
+        ring world size would attend across ranks that hold the same data
+        rather than a genuine peer shard. Only ``ring_active=True`` -- the
+        packed multi-segment attention's own row shard -- rotates KV.
         """
         if query.dtype is not torch.bfloat16:
             raise ValueError(
@@ -179,8 +183,28 @@ class XAttnRingAttentionImpl(AttentionImpl):
                 )
             real_seq_len = boundaries[1]
 
-        ring_ws, _ = get_ring_ctx()
         chunk_len = query.shape[0]
+        if not ring_active:
+            # No cross-rank rotation: just mask off this chunk's own padding
+            # tail with a single local FMHA round.
+            valid_len = min(max(real_seq_len, 0), chunk_len)
+            if valid_len <= 0:
+                raise ValueError(
+                    f"real_seq_len={real_seq_len} leaves no real rows in this "
+                    f"{chunk_len}-row chunk."
+                )
+            out = self._ring_attn_fmha(
+                query.unsqueeze(0).contiguous(),
+                key.unsqueeze(0).contiguous(),
+                value.unsqueeze(0).contiguous(),
+                softmax_scale=self.softmax_scale,
+                causal=False,
+                return_softmax_lse=False,
+                valid_kv_len=valid_len,
+            )
+            return out.squeeze(0)
+
+        ring_ws, _ = get_ring_ctx()
         valid_kv_lens = [
             min(max(real_seq_len - rank * chunk_len, 0), chunk_len)
             for rank in range(ring_ws)
