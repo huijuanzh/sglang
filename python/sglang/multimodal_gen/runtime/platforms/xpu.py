@@ -162,6 +162,31 @@ class XpuPlatform(Platform):
                 )
                 return "sglang.multimodal_gen.runtime.layers.attention.backends.sdpa.SDPABackend"
 
+        if selected_backend == AttentionBackendEnum.XATTN_RING_ATTN:
+            from sglang.multimodal_gen.runtime.layers.attention.backends.xattn_ring_attn import (
+                XAttnRingAttentionBackend,
+                is_xattn_ring_available,
+            )
+
+            if not is_xattn_ring_available():
+                raise ValueError(
+                    "xattn_ring attention backend requires the xattention "
+                    "extension on an Intel XPU."
+                )
+            if head_size not in XAttnRingAttentionBackend.get_supported_head_sizes():
+                raise ValueError(
+                    f"xattn_ring attention backend does not support head_size={head_size}."
+                )
+            # dtype is deliberately not checked here: DenoisingStage probes this
+            # selector with a hardcoded fp16 to size attention metadata. The
+            # kernel's bf16 requirement is enforced on the real activations in
+            # XAttnRingAttentionImpl.forward().
+            logger.info("Using XAttention ring attention backend on Intel XPU.")
+            return (
+                "sglang.multimodal_gen.runtime.layers.attention.backends."
+                "xattn_ring_attn.XAttnRingAttentionBackend"
+            )
+
         if selected_backend == AttentionBackendEnum.TORCH_SDPA:
             logger.info("Using Torch SDPA backend for Intel XPU.")
             return "sglang.multimodal_gen.runtime.layers.attention.backends.sdpa.SDPABackend"

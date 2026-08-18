@@ -51,6 +51,7 @@ class BaseDiT(nn.Module, ABC):
         AttentionBackendEnum.LASER_ATTN,
         AttentionBackendEnum.BLOCK_SPARSE_ATTN,
         AttentionBackendEnum.RAIN_FUSION_ATTN,
+        AttentionBackendEnum.XATTN_RING_ATTN,
     }
 
     def __init_subclass__(cls) -> None:

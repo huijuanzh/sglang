@@ -1210,14 +1210,18 @@ class USPAttention(nn.Module):
 
         # Ring Attention within subgroups or local attention
         if get_ring_parallel_world_size() > 1:
-            out = ring_attn(
-                q,
-                k,
-                v,
-                attn_impl=self.attn_impl,
-                is_causal=self.causal,
-                dropout_p=self.dropout_p,
-            )
+            if getattr(self.attn_impl, "handles_sequence_parallel_ring", False):
+                # The kernel rotates K/V itself; wrapping it would ring twice.
+                out = self.attn_impl.forward(q, k, v, ctx_attn_metadata)
+            else:
+                out = ring_attn(
+                    q,
+                    k,
+                    v,
+                    attn_impl=self.attn_impl,
+                    is_causal=self.causal,
+                    dropout_p=self.dropout_p,
+                )
         else:
             # -> [B, S, H_local, D]
             out = self.attn_impl.forward(q, k, v, ctx_attn_metadata)
