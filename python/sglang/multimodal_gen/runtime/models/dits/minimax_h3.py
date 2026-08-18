@@ -560,12 +560,16 @@ def _minimax_h3_attention_core_impl(
             )
         )
 
-    if ring_active:
+    impl = attention._attention_impl
+    # A backend that rotates KV itself takes the packed chunk directly through
+    # forward_varlen; running the generic loop over it would ring twice.
+    if ring_active and not getattr(impl, "handles_sequence_parallel_ring", False):
         ring_ws, _ = get_ring_ctx()
         if attention._attention_backend_enum is not AttentionBackendEnum.FA:
             raise NotImplementedError(
                 "MiniMax H3 ring parallelism requires the FlashAttention "
-                "backend (matches --ring-degree's general restriction)."
+                "backend, or one that rotates KV itself "
+                "(AttentionImpl.handles_sequence_parallel_ring)."
             )
         # max_seqlen is cu_seqlens[1] (`used`) by construction -- the real,
         # non-padding row count ring needs, already a host int here.
@@ -578,7 +582,7 @@ def _minimax_h3_attention_core_impl(
             ring_ws=ring_ws,
         )
     else:
-        out = attention._attention_impl.forward_varlen(
+        out = impl.forward_varlen(
             q,
             k,
             v,

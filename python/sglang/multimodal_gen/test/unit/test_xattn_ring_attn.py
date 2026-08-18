@@ -76,6 +76,13 @@ def _reference_attention(q, k, v, scale):
     return out.transpose(1, 2)
 
 
+def _reference_attention_thd(q, k, v, scale):
+    """Same, for the packed ``[T, H, D]`` layout ``forward_varlen`` takes."""
+    logits = (q.transpose(0, 1).float() @ k.transpose(0, 1).float().transpose(-1, -2)) * scale
+    out = torch.softmax(logits, dim=-1) @ v.transpose(0, 1).float()
+    return out.transpose(0, 1)
+
+
 def _worker(rank, world_size, port, queue):
     try:
         os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
@@ -164,6 +171,121 @@ def test_ring_matches_full_attention(world_size):
         # bf16 accumulation over `world_size` merged blocks lands around 5e-3.
         assert rel_err < 1e-2, f"rank {rank} rel err {rel_err:.3e}"
         # Guards against the ring degenerating to local-only attention.
+        assert local_gap > 10 * rel_err, (
+            f"rank {rank}: local-only attention is within {local_gap:.3e} of the "
+            f"reference, so rel err {rel_err:.3e} does not prove the ring rotated"
+        )
+
+
+@requires_xattn
+def test_forward_varlen_rejects_multi_document():
+    """A per-round KV clamp cannot mask interior packed-segment boundaries."""
+    impl = XAttnRingAttentionBackend.get_impl_cls()(
+        num_heads=H, head_size=D, causal=False, softmax_scale=D**-0.5
+    )
+    q = torch.zeros(8, H, D, dtype=DTYPE)
+    with pytest.raises(NotImplementedError, match="single right-padded"):
+        impl.forward_varlen(
+            q,
+            q,
+            q,
+            cu_seqlens=torch.tensor([0, 4, 8], dtype=torch.int32),
+            max_seqlen=4,
+            cu_seqlens_host=(0, 4, 8),
+        )
+
+
+def _worker_varlen(rank, world_size, port, queue):
+    try:
+        os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+        torch.xpu.set_device(rank)
+        device = torch.device("xpu", rank)
+
+        from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+            init_distributed_environment,
+            initialize_model_parallel,
+        )
+
+        init_distributed_environment(
+            world_size=world_size, rank=rank, local_rank=rank, backend="xccl"
+        )
+        initialize_model_parallel(
+            sequence_parallel_degree=world_size, ulysses_degree=1, ring_degree=world_size
+        )
+
+        total = S_LOCAL * world_size
+        # Leave the last rank's block part real, part padding -- the case the
+        # per-rank valid_kv_lens clamp exists for.
+        real_seq_len = total - S_LOCAL // 4
+        scale = D**-0.5
+        gen = torch.Generator(device="cpu").manual_seed(0)
+        q, k, v = (
+            torch.randn((total, H, D), generator=gen, dtype=torch.float32).to(device, DTYPE)
+            for _ in range(3)
+        )
+        # Poison the padding rows: attending across the boundary is then obvious
+        # instead of being lost in bf16 noise.
+        k[real_seq_len:] = 100.0
+        v[real_seq_len:] = 100.0
+
+        shard = slice(rank * S_LOCAL, (rank + 1) * S_LOCAL)
+        n_real = max(0, min(real_seq_len - rank * S_LOCAL, S_LOCAL))
+
+        impl = XAttnRingAttentionBackend.get_impl_cls()(
+            num_heads=H, head_size=D, causal=False, softmax_scale=scale
+        )
+        got = impl.forward_varlen(
+            q[shard].contiguous(),
+            k[shard].contiguous(),
+            v[shard].contiguous(),
+            cu_seqlens=torch.tensor([0, real_seq_len], dtype=torch.int32, device=device),
+            max_seqlen=real_seq_len,
+            cu_seqlens_host=(0, real_seq_len),
+        )
+
+        # Padding rows produce unused garbage; only the real rows are compared.
+        expected = _reference_attention_thd(
+            q[shard][:n_real], k[:real_seq_len], v[:real_seq_len], scale
+        )
+        denom = expected.abs().max()
+        rel_err = ((got[:n_real].float() - expected).abs().max() / denom).item()
+
+        local_only = _reference_attention_thd(
+            q[shard][:n_real], k[shard][:n_real], v[shard][:n_real], scale
+        )
+        local_gap = ((local_only - expected).abs().max() / denom).item()
+        queue.put((rank, rel_err, local_gap, None))
+    except Exception as exc:
+        queue.put((rank, None, None, repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@requires_xattn
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_ring_varlen_ignores_padding(world_size):
+    """The H3 entry point: ring over a right-padded packed sequence."""
+    if torch.xpu.device_count() < world_size:
+        pytest.skip(f"requires {world_size} XPUs")
+
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    port = _free_port()
+    procs = [
+        ctx.Process(target=_worker_varlen, args=(r, world_size, port, queue))
+        for r in range(world_size)
+    ]
+    for p in procs:
+        p.start()
+    results = [queue.get(timeout=300) for _ in range(world_size)]
+    for p in procs:
+        p.join(timeout=60)
+
+    for rank, rel_err, local_gap, err in results:
+        assert err is None, f"rank {rank} failed: {err}"
+        # Poisoned padding rows would push this far past bf16 noise.
+        assert rel_err < 1e-2, f"rank {rank} rel err {rel_err:.3e}"
         assert local_gap > 10 * rel_err, (
             f"rank {rank}: local-only attention is within {local_gap:.3e} of the "
             f"reference, so rel err {rel_err:.3e} does not prove the ring rotated"

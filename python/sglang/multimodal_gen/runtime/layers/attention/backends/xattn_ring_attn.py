@@ -16,7 +16,10 @@ Select it with ``--attention-backend xattn_ring`` and ``--ring-degree > 1``.
 
 import torch
 
-from sglang.multimodal_gen.runtime.distributed.parallel_state import get_sp_group
+from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_ring_ctx,
+    get_sp_group,
+)
 from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend import (
     AttentionBackend,
     AttentionImpl,
@@ -135,3 +138,72 @@ class XAttnRingAttentionImpl(AttentionImpl):
             causal=False,
             return_softmax_lse=return_softmax_lse,
         )
+
+    def forward_varlen(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        cu_seqlens_host: tuple[int, ...] | None = None,
+    ) -> torch.Tensor:
+        """Ring-rotated attention over one rank's packed ``[T, H, D]`` chunk.
+
+        Mirrors ``usp._ring_attention_varlen``: the packed sequence is a single
+        right-padded document split into equal per-rank blocks, so block ``r``
+        contributes only ``clamp(real_len - r * T, 0, T)`` real rows. Passing
+        those lengths as ``valid_kv_lens`` makes the kernel clamp each ring
+        round internally, so no round attends across the padding boundary.
+        """
+        if query.dtype is not torch.bfloat16:
+            raise ValueError(
+                f"{type(self).__name__} requires bfloat16, got {query.dtype}"
+            )
+
+        real_seq_len = max_seqlen
+        if cu_seqlens_host is not None:
+            boundaries = tuple(int(v) for v in cu_seqlens_host)
+            # A per-round KV clamp can only trim a trailing padding run; it
+            # cannot mask interior boundaries, so reject true multi-document
+            # packing rather than silently attending across segments.
+            if (
+                len(boundaries) < 2
+                or boundaries[0] != 0
+                or any(b != boundaries[1] for b in boundaries[1:])
+            ):
+                raise NotImplementedError(
+                    f"{type(self).__name__} supports a single right-padded "
+                    f"packed document, got cu_seqlens={boundaries}."
+                )
+            real_seq_len = boundaries[1]
+
+        ring_ws, _ = get_ring_ctx()
+        chunk_len = query.shape[0]
+        valid_kv_lens = [
+            min(max(real_seq_len - rank * chunk_len, 0), chunk_len)
+            for rank in range(ring_ws)
+        ]
+        if any(length <= 0 for length in valid_kv_lens):
+            # The kernel requires every rank to hold at least one real row.
+            raise NotImplementedError(
+                f"ring degree {ring_ws} leaves an all-padding block for "
+                f"real_seq_len={real_seq_len} over {chunk_len}-row chunks "
+                f"(valid_kv_lens={valid_kv_lens}); lower --ring-degree."
+            )
+
+        ring_group = get_sp_group().ring_group
+        assert ring_group is not None, "Ring process group is not initialized."
+
+        out = self._ring_attn_ipc_forward(
+            process_group=ring_group,
+            q=query.unsqueeze(0).contiguous(),
+            k=key.unsqueeze(0).contiguous(),
+            v=value.unsqueeze(0).contiguous(),
+            softmax_scale=self.softmax_scale,
+            causal=False,
+            return_softmax_lse=False,
+            valid_kv_lens=valid_kv_lens,
+        )
+        return out.squeeze(0)
