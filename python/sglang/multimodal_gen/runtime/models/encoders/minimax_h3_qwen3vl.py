@@ -43,6 +43,10 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
 
     layer_names = [*TextEncoder.layer_names, "model.visual.blocks"]
 
+    # Encoding runs through encode_ids(), not __call__, so FSDP2 would never
+    # unshard the parameters the shard conditions left in the root group.
+    _fsdp_forward_methods = ("encode_ids",)
+
     supports_dp_encode = True
     supported_checkpoint_quantization_methods = frozenset({"fp8"})
 
