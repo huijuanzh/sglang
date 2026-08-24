@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the XAttention ring attention backend."""
+"""Tests for the deepklox ring attention backend."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ DTYPE = torch.bfloat16
 
 requires_xattn = pytest.mark.skipif(
     not is_xattn_ring_available(),
-    reason="requires the xattention extension on an Intel XPU",
+    reason="requires the deepklox extension on an Intel XPU",
 )
 
 

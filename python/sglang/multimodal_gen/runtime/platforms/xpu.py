@@ -170,7 +170,7 @@ class XpuPlatform(Platform):
 
             if not is_xattn_ring_available():
                 raise ValueError(
-                    "xattn_ring attention backend requires the xattention "
+                    "xattn_ring attention backend requires the deepklox "
                     "extension on an Intel XPU."
                 )
             if head_size not in XAttnRingAttentionBackend.get_supported_head_sizes():
@@ -181,7 +181,7 @@ class XpuPlatform(Platform):
             # selector with a hardcoded fp16 to size attention metadata. The
             # kernel's bf16 requirement is enforced on the real activations in
             # XAttnRingAttentionImpl.forward().
-            logger.info("Using XAttention ring attention backend on Intel XPU.")
+            logger.info("Using deepklox ring attention backend on Intel XPU.")
             return (
                 "sglang.multimodal_gen.runtime.layers.attention.backends."
                 "xattn_ring_attn.XAttnRingAttentionBackend"

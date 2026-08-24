@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ring attention backend built on XAttention's SYCL-TLA IPC kernel (Intel XPU).
+"""Ring attention backend built on deepklox's SYCL-TLA IPC kernel (Intel XPU).
 
 Ported from vLLM-Omni's XPU ring path
 (``vllm_omni/diffusion/attention/parallel/ring.py``), which dispatches to
-``xattention.ring_attn_ipc_forward``.
+``deepklox.ring_attn_ipc_forward``.
 
 The kernel owns the whole ring pass: it rotates the K/V shards around the ring
 group over Level-Zero IPC peer copies, runs the FMHA for each step and merges
@@ -36,7 +36,7 @@ logger = init_logger(__name__)
 
 def is_xattn_ring_available() -> bool:
     try:
-        import xattention  # noqa: F401
+        import deepklox  # noqa: F401
     except ImportError:
         return False
     return hasattr(torch, "xpu") and torch.xpu.is_available()
@@ -90,8 +90,8 @@ class XAttnRingAttentionImpl(AttentionImpl):
         prefix: str = "",
         **extra_impl_args,
     ) -> None:
-        from xattention import ring_attn_ipc_forward
-        from xattention.ring_attn_interface import ring_attn_fmha
+        from deepklox import ring_attn_ipc_forward
+        from deepklox.ring_attn_interface import ring_attn_fmha
 
         if causal:
             # The kernel applies the mask identically on every ring round, so it
