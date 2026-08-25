@@ -52,6 +52,15 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_component(cls, module: torch.nn.Module) -> bool:
+        """Whether this backend may serve the given loaded pipeline component."""
+        return True
+
+    @classmethod
+    def validate_parallelism(cls, server_args: Any) -> None:
+        """Raise if the launch topology cannot drive this backend."""
+
+    @classmethod
     def unsupported_requirements(
         cls, requirements: AttentionRequirements
     ) -> tuple[str, ...]:

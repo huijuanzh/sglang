@@ -113,6 +113,73 @@ def get_component_attn_backend_name() -> str | None:
     return context.component_name if context is not None else None
 
 
+# Attribute carrying a component's resolved backend on every module of its tree.
+# The loader's context var only lives for the duration of the load call, so a
+# model that resolves its backend later (lazily, on the first forward) has to
+# read the pin off the module it belongs to instead.
+COMPONENT_ATTN_BACKEND_ATTR = "_component_attn_backend"
+
+# Backends whose launch topology can be validated before any component is
+# loaded. Keyed by enum rather than by component name so that adding a
+# constrained backend never touches the server args policy code.
+_CONSTRAINED_BACKEND_CLASS_PATHS: dict[AttentionBackendEnum, str] = {
+    AttentionBackendEnum.XATTN_RING_ATTN: (
+        "sglang.multimodal_gen.runtime.layers.attention.backends."
+        "xattn_ring_attn.XAttnRingAttentionBackend"
+    ),
+}
+
+
+def get_constrained_attn_backend_cls(
+    backend: AttentionBackendEnum,
+) -> type[AttentionBackend] | None:
+    """The backend class for a backend that declares launch-time constraints.
+
+    Resolved without a head size or device so it stays usable while the server
+    args are still being normalized.
+    """
+    class_path = _CONSTRAINED_BACKEND_CLASS_PATHS.get(backend)
+    if class_path is None:
+        return None
+    return cast(type[AttentionBackend], resolve_obj_by_qualname(class_path))
+
+
+def bind_component_attn_backend(
+    module: torch.nn.Module | object,
+    backend: AttentionBackendEnum | None,
+    *,
+    component_name: str | None = None,
+) -> None:
+    """Persist a component's backend pin on its whole module tree.
+
+    Broadcasting to every submodule rather than just the root is what makes a
+    lazily resolving leaf (which has no parent pointer) able to find the pin.
+    """
+    if backend is None or not isinstance(module, torch.nn.Module):
+        return
+
+    backend_cls = get_constrained_attn_backend_cls(backend)
+    if backend_cls is not None and not backend_cls.supports_component(module):
+        raise ValueError(
+            f"Attention backend {backend.name.lower()!r} does not support "
+            f"component {component_name or module.__class__.__name__!r} "
+            f"({type(module).__name__})"
+        )
+
+    for submodule in module.modules():
+        setattr(submodule, COMPONENT_ATTN_BACKEND_ATTR, backend)
+
+
+def get_module_attn_backend(module: object | None) -> AttentionBackendEnum | None:
+    if module is None:
+        return None
+    return getattr(module, COMPONENT_ATTN_BACKEND_ATTR, None)
+
+
+def _has_component_attn_pins() -> bool:
+    return bool(getattr(get_global_server_args(), "component_attention_backends", None))
+
+
 def _record_component_attn_backend(backend_name: str, reason: str | None) -> bool:
     context = get_component_attn_backend_context()
     if context is None or context.component_name is None:
@@ -155,6 +222,7 @@ def get_attn_backend(
     attention_requirements: AttentionRequirements | None = None,
     default_attention_backend: AttentionBackendEnum | None = None,
     is_cross_attention: bool = False,
+    module: object | None = None,
 ) -> type[AttentionBackend]:
     requirements = attention_requirements or AttentionRequirements()
     if supported_attention_backends is None:
@@ -171,8 +239,29 @@ def get_attn_backend(
         selected_backend = get_global_forced_attn_backend()
         selection_is_explicit = selected_backend is not None
     if selected_backend is None:
+        # The module-bound pin outranks the context var: it is the same pin,
+        # attributed to a concrete component rather than to whatever load is
+        # currently in flight.
+        selected_backend = get_module_attn_backend(module)
+        selection_is_explicit = selected_backend is not None
+    if selected_backend is None:
         selected_backend = get_component_forced_attn_backend()
         selection_is_explicit = selected_backend is not None
+    if (
+        selected_backend is None
+        and module is None
+        and get_component_attn_backend_context() is None
+        and _has_component_attn_pins()
+    ):
+        # Neither a load-time context nor a module to read the pin from: this
+        # resolution cannot be attributed to a component, so a per-component
+        # backend would be silently replaced by the global one.
+        logger.warning_once(
+            "Resolving an attention backend with no component attribution while "
+            "per-component attention backends are configured; the component pin "
+            "cannot be honoured here. Pass module=<the owning nn.Module> to "
+            "get_attn_backend()."
+        )
     if selected_backend is None:
         server_args = get_global_server_args()
         if server_args.attention_backend is not None:

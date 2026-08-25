@@ -191,6 +191,46 @@ class TestServerArgsPathExpansion(unittest.TestCase):
         self.assertEqual(backend.name, "TORCH_SDPA")
         self.assertEqual(matched_key, "text_encoder")
 
+    def test_ring_backend_keeps_a_global_selection(self):
+        args = self._from_dict_without_model_resolution(
+            {
+                "model_path": "/data/my-model",
+                "attention_backend": "xattn_ring_attn",
+                "num_gpus": 2,
+                "sp_degree": 2,
+                "ring_degree": 2,
+                "ulysses_degree": 1,
+            }
+        )
+
+        # Component eligibility is enforced against the loaded module, not by
+        # rewriting the global selection into a hardcoded component list.
+        self.assertEqual(args.attention_backend, "xattn_ring_attn")
+        self.assertEqual(args.component_attention_backends, {})
+
+    def test_ring_backend_rejects_unsupported_topologies(self):
+        base = {
+            "model_path": "/data/my-model",
+            "component_attention_backends": {"transformer": "xattn_ring_attn"},
+        }
+        topologies = [
+            # ulysses instead of a pure ring
+            {"num_gpus": 4, "sp_degree": 4, "ring_degree": 2, "ulysses_degree": 2},
+            # no ring
+            {"num_gpus": 2, "sp_degree": 2, "ring_degree": 1, "ulysses_degree": 1},
+            # tensor parallelism / partial sequence parallelism
+            {
+                "num_gpus": 4,
+                "tp_size": 2,
+                "sp_degree": 2,
+                "ring_degree": 2,
+                "ulysses_degree": 1,
+            },
+        ]
+        for topology in topologies:
+            with self.subTest(**topology), self.assertRaises(ValueError):
+                self._from_dict_without_model_resolution({**base, **topology})
+
     def test_invalid_component_attention_backend_raises(self):
         with self.assertRaises(ValueError):
             self._from_dict_without_model_resolution(

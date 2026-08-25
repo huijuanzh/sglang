@@ -11,7 +11,9 @@ the partial results with an online softmax. Because the copies run on a
 dedicated copy engine rather than the compute queue, the transfer overlaps the
 attention kernels instead of serializing against them.
 Limits inherited from the kernel: bf16 only, non-causal only, no joint K/V.
-Select it with ``--attention-backend xattn_ring`` and ``--ring-degree > 1``.
+Select it with ``--attention-backend xattn_ring_attn`` and ``--ring-degree > 1``;
+it only serves DiT components and only on a pure ring topology (no tensor
+parallelism, Ulysses 1) -- see ``supports_component``/``validate_parallelism``.
 """
 
 import torch
@@ -54,6 +56,33 @@ class XAttnRingAttentionBackend(AttentionBackend):
         # The fused kernel rotates KV and merges partials internally, so it
         # never has to hand a per-hop LSE back to the generic ring loop.
         return True
+
+    @classmethod
+    def supports_component(cls, module) -> bool:
+        from sglang.multimodal_gen.runtime.models.dits.base import BaseDiT
+
+        # Only the DiT is sequence parallel; every other component holds whole
+        # sequences, so rotating their KV over the ring group is meaningless.
+        return isinstance(module, BaseDiT)
+
+    @classmethod
+    def validate_parallelism(cls, server_args) -> None:
+        name = cls.get_enum().name.lower()
+        if server_args.ring_degree <= 1 or server_args.ulysses_degree != 1:
+            raise ValueError(
+                f"{name} requires ring_degree > 1 and ulysses_degree = 1; got "
+                f"ring_degree={server_args.ring_degree}, "
+                f"ulysses_degree={server_args.ulysses_degree}"
+            )
+        # The kernel rotates KV over the whole DiT sequence shard, so the DiT
+        # must be pure sequence parallel across every GPU.
+        if server_args.tp_size != 1 or server_args.sp_degree != server_args.num_gpus:
+            raise ValueError(
+                f"{name} requires the DiT to run full sequence parallelism "
+                f"without tensor parallelism (tp_size = 1, sp_degree = num_gpus); "
+                f"got tp_size={server_args.tp_size}, "
+                f"sp_degree={server_args.sp_degree}, num_gpus={server_args.num_gpus}"
+            )
 
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
@@ -211,11 +240,13 @@ class XAttnRingAttentionImpl(AttentionImpl):
             for rank in range(ring_ws)
         ]
         if any(length <= 0 for length in valid_kv_lens):
-            # The kernel requires every rank to hold at least one real row.
+            # The kernel requires every rank to hold at least one real row, and
+            # the ring degree is pinned to the GPU count, so the fix is a longer
+            # sequence or fewer GPUs rather than a smaller ring.
             raise NotImplementedError(
                 f"ring degree {ring_ws} leaves an all-padding block for "
                 f"real_seq_len={real_seq_len} over {chunk_len}-row chunks "
-                f"(valid_kv_lens={valid_kv_lens}); lower --ring-degree."
+                f"(valid_kv_lens={valid_kv_lens}); run this request on fewer GPUs."
             )
 
         ring_group = get_sp_group().ring_group

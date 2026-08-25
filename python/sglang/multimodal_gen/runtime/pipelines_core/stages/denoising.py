@@ -307,6 +307,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             head_size=attn_head_size,
             dtype=torch.float16,
             selected_attention_backend=selected_attention_backend,
+            module=self.transformer,
         )
 
         # cfg

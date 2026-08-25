@@ -557,6 +557,7 @@ def _minimax_h3_attention_core_impl(
                 attention.head_dim,
                 q.dtype,
                 attention_requirements=AttentionRequirements(packed_varlen=True),
+                module=attention,
             )
         )
 
@@ -1697,6 +1698,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             self.arch.attention_head_dim,
             _BF16_DTYPE,
             attention_requirements=AttentionRequirements(packed_varlen=True),
+            module=self,
         )
         for module in self.modules():
             if isinstance(module, MiniMaxH3Attention):

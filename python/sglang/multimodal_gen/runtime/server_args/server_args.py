@@ -896,6 +896,7 @@ class ServerArgs(DisaggServerArgsMixin):
                 self.component_attention_backends
             )
         )
+        self._validate_attention_backend_parallelism()
 
         # attention_backend_config
         if self.attention_backend_config is None:
@@ -973,6 +974,27 @@ class ServerArgs(DisaggServerArgsMixin):
                 f"Invalid attention backend '{backend}'. "
                 f"Available options are: {[e.name.lower() for e in AttentionBackendEnum]}"
             ) from None
+
+    def _validate_attention_backend_parallelism(self) -> None:
+        """Let every selected backend reject a topology it cannot drive.
+
+        Component eligibility is checked later, against the loaded module, by
+        ``bind_component_attn_backend``; only the launch topology is knowable
+        here, and it is worth failing on before any weights are downloaded.
+        """
+        from sglang.multimodal_gen.runtime.layers.attention.selector import (
+            get_constrained_attn_backend_cls,
+        )
+
+        selected = set(self.component_attention_backends.values())
+        if self.attention_backend is not None:
+            selected.add(self.attention_backend)
+        for backend_name in sorted(selected):
+            backend_cls = get_constrained_attn_backend_cls(
+                AttentionBackendEnum[backend_name.upper()]
+            )
+            if backend_cls is not None:
+                backend_cls.validate_parallelism(self)
 
     @staticmethod
     def _parse_component_attention_backend_map(

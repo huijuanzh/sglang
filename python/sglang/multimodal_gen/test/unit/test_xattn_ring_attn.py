@@ -50,6 +50,38 @@ def test_backend_rejects_causal():
         impl_cls(num_heads=H, head_size=D, causal=True, softmax_scale=D**-0.5)
 
 
+def test_binding_rejects_a_non_dit_component():
+    from sglang.multimodal_gen.runtime.layers.attention.selector import (
+        bind_component_attn_backend,
+    )
+
+    with pytest.raises(ValueError, match="does not support component"):
+        bind_component_attn_backend(
+            torch.nn.Linear(4, 4),
+            AttentionBackendEnum.XATTN_RING_ATTN,
+            component_name="text_encoder",
+        )
+
+
+def test_binding_survives_lazy_resolution():
+    """A model that resolves inside forward() still sees its component pin."""
+    from sglang.multimodal_gen.runtime.layers.attention.selector import (
+        bind_component_attn_backend,
+        get_module_attn_backend,
+    )
+
+    class Leaf(torch.nn.Module):
+        pass
+
+    root = torch.nn.Sequential(Leaf(), torch.nn.Sequential(Leaf()))
+    bind_component_attn_backend(root, AttentionBackendEnum.FA, component_name="dit")
+
+    assert all(
+        get_module_attn_backend(module) is AttentionBackendEnum.FA
+        for module in root.modules()
+    )
+
+
 def test_platform_rejects_unsupported_head_size():
     from sglang.multimodal_gen.runtime.platforms.xpu import XpuPlatform
 

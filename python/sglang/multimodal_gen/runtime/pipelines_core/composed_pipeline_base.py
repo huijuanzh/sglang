@@ -19,6 +19,7 @@ from sglang.multimodal_gen.runtime.disaggregation.roles import (
     filter_modules_for_role,
 )
 from sglang.multimodal_gen.runtime.layers.attention.selector import (
+    bind_component_attn_backend,
     component_attn_backend_context_manager,
 )
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
@@ -503,6 +504,14 @@ class ComposedPipelineBase(ABC):
                 continue
             if loaded_modules is not None and module_name in loaded_modules:
                 logger.info("Using module %s already provided", module_name)
+                provided_backend, provided_key = (
+                    server_args.resolve_component_attention_backend(module_name)
+                )
+                bind_component_attn_backend(
+                    loaded_modules[module_name],
+                    provided_backend,
+                    component_name=provided_key or module_name,
+                )
                 loaded_components[module_name] = loaded_modules[module_name]
                 continue
 
@@ -566,6 +575,12 @@ class ComposedPipelineBase(ABC):
                 )
 
             self.memory_usages[load_module_name] = memory_usage
+
+            bind_component_attn_backend(
+                module,
+                attn_backend,
+                component_name=matched_backend_key or module_name,
+            )
 
             if module_name in loaded_components:
                 logger.warning("Overwriting module %s", module_name)
