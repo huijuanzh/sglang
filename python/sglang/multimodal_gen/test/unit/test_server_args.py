@@ -203,8 +203,6 @@ class TestServerArgsPathExpansion(unittest.TestCase):
             }
         )
 
-        # Component eligibility is enforced against the loaded module, not by
-        # rewriting the global selection into a hardcoded component list.
         self.assertEqual(args.attention_backend, "xattn_ring_attn")
         self.assertEqual(args.component_attention_backends, {})
 
@@ -218,7 +216,7 @@ class TestServerArgsPathExpansion(unittest.TestCase):
             {"num_gpus": 4, "sp_degree": 4, "ring_degree": 2, "ulysses_degree": 2},
             # no ring
             {"num_gpus": 2, "sp_degree": 2, "ring_degree": 1, "ulysses_degree": 1},
-            # tensor parallelism / partial sequence parallelism
+            # tensor parallelism
             {
                 "num_gpus": 4,
                 "tp_size": 2,
@@ -230,6 +228,23 @@ class TestServerArgsPathExpansion(unittest.TestCase):
         for topology in topologies:
             with self.subTest(**topology), self.assertRaises(ValueError):
                 self._from_dict_without_model_resolution({**base, **topology})
+
+    def test_ring_backend_allows_cfg_parallel_sp_group(self):
+        args = self._from_dict_without_model_resolution(
+            {
+                "model_path": "/data/my-model",
+                "attention_backend": "xattn_ring_attn",
+                "num_gpus": 4,
+                "cfg_parallel_degree": 2,
+                "sp_degree": 2,
+                "ring_degree": 2,
+                "ulysses_degree": 1,
+            }
+        )
+
+        self.assertTrue(args.enable_cfg_parallel)
+        self.assertEqual(args.cfg_parallel_degree, 2)
+        self.assertEqual(args.sp_degree, 2)
 
     def test_invalid_component_attention_backend_raises(self):
         with self.assertRaises(ValueError):

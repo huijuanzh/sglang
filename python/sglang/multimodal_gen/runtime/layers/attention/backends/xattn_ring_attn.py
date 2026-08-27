@@ -74,12 +74,11 @@ class XAttnRingAttentionBackend(AttentionBackend):
                 f"ring_degree={server_args.ring_degree}, "
                 f"ulysses_degree={server_args.ulysses_degree}"
             )
-        # The kernel rotates KV over the whole DiT sequence shard, so the DiT
-        # must be pure sequence parallel across every GPU.
-        if server_args.tp_size != 1 or server_args.sp_degree != server_args.num_gpus:
+        # CFG parallelism creates independent SP groups, each with its own ring.
+        if server_args.tp_size != 1:
             raise ValueError(
                 f"{name} requires the DiT to run full sequence parallelism "
-                f"without tensor parallelism (tp_size = 1, sp_degree = num_gpus); "
+                f"without tensor parallelism (tp_size = 1); "
                 f"got tp_size={server_args.tp_size}, "
                 f"sp_degree={server_args.sp_degree}, num_gpus={server_args.num_gpus}"
             )
@@ -240,15 +239,12 @@ class XAttnRingAttentionImpl(AttentionImpl):
             for rank in range(ring_ws)
         ]
         if any(length <= 0 for length in valid_kv_lens):
-            # The kernel requires every rank to hold at least one real row, and
-            # the ring degree is pinned to the GPU count, so the fix is a longer
-            # sequence or fewer GPUs rather than a smaller ring.
             raise NotImplementedError(
                 f"ring degree {ring_ws} leaves an all-padding block for "
                 f"real_seq_len={real_seq_len} over {chunk_len}-row chunks "
                 f"(valid_kv_lens={valid_kv_lens}); run this request on fewer GPUs."
             )
-
+        # CFG parallelism creates independent SP groups, each with its own ring.
         ring_group = get_sp_group().ring_group
         assert ring_group is not None, "Ring process group is not initialized."
 
