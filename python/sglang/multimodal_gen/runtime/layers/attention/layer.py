@@ -681,6 +681,7 @@ class USPAttention(nn.Module):
         softmax_scale: float | None = None,
         causal: bool = False,
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
+        selected_attention_backend: AttentionBackendEnum | None = None,
         default_attention_backend: AttentionBackendEnum | None = None,
         prefix: str = "",
         dropout_rate: float = 0.0,
@@ -716,6 +717,7 @@ class USPAttention(nn.Module):
             head_size,
             dtype,
             supported_attention_backends=supported_attention_backends,
+            selected_attention_backend=selected_attention_backend,
             default_attention_backend=default_attention_backend,
             is_cross_attention=is_cross_attention,
         )
